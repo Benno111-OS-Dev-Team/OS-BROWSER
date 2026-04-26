@@ -74,6 +74,8 @@ jobs:
         run: |
           git clone --depth=1 https://chromium.googlesource.com/chromium/tools/depot_tools.git /tmp/depot_tools
           echo "/tmp/depot_tools" >> $GITHUB_PATH
+          /tmp/depot_tools/update_depot_tools || true
+          python3 /tmp/depot_tools/gclient.py --version
 
       - name: Install build dependencies via install-build-deps.sh
         run: |
@@ -142,6 +144,8 @@ jobs:
         run: |
           git clone --depth=1 https://chromium.googlesource.com/chromium/tools/depot_tools.git C:\depot_tools
           echo "C:\depot_tools" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          & C:\depot_tools\update_depot_tools.bat
+          & C:\depot_tools\gclient.bat --version
 
       - name: Configure GN build args (Windows)
         shell: cmd
@@ -252,6 +256,8 @@ jobs:
         run: |
           git clone --depth=1 https://chromium.googlesource.com/chromium/tools/depot_tools.git /tmp/depot_tools
           echo "/tmp/depot_tools" >> $GITHUB_PATH
+          /tmp/depot_tools/update_depot_tools || true
+          python3 /tmp/depot_tools/gclient.py --version
 
       - name: Install Linux build dependencies
         run: |

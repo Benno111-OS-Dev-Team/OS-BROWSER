@@ -1,13 +1,13 @@
 <div style="display: flex; align-items: center;">
-    <a href="https://www.win32subsystem.live/supermium/"><img src="https://github.com/win32ss/supermium/assets/68521531/f34ceb1c-15b2-4818-af1f-c0251c77af2f" width="200" alt="Supermium Browser" ></a>
-    <h1><a href="https://www.win32subsystem.live/supermium/">The Supermium Browser</a></h1>
+    <img src="https://github.com/user-attachments/assets/0af8abb8-35ed-456a-9a38-cc6386467f42" width="200" alt="OS Browser">
+    <h1>OS Browser</h1>
 </div>
 
 <div style="display: flex; align-items: center;">
-  <mark>Latest progwrp.dll (version 1.1.0.5024) - included in Supermium 126 R7!</mark>
+  <mark>Latest progwrp.dll (version 1.1.0.5024)</mark>
   <table>
     <caption>
-      <h4>This Supermium component receives enhancements and improvements from time to time, primarily for operating systems prior to Windows Vista. It is compatible with an up-to-date Chromium-based web browser for Windows XP, 2003, Vista, 7, and 8.x.</h4>
+      <h4>This component receives enhancements and improvements from time to time, primarily for operating systems prior to Windows Vista. It is compatible with an up-to-date Chromium-based web browser for Windows XP, 2003, Vista, 7, and 8.x.</h4>
     </caption>
     <tr>
       <th scope="row">64-bits</th>
@@ -20,12 +20,7 @@
   </table>
 </div>
 
-**Official Links:**
-- [supermiu.me](https://supermiu.me)
-- [supermium.net](https://supermium.net)
-- [win32subsystem.live](https://win32subsystem.live)
-
-## The Supermium web browser also provides the following features:
+## The OS Browser web browser also provides the following features:
 > -  Aero Glass and Aero Glass-style titlebars instead of Windows 10-style ones (#force-xp-theme in chrome://flags for the latter)  
 > -  Turnaround for major vulnerability patches generally less than one week from upstream disclosure  
 > -  A functional sandbox for enhanced security  
@@ -44,6 +39,6 @@
 - [ ] Manifest V2 (once removed by Google)
 
 ## Support
-If you enjoy using Supermium and want to support the development, consider donating on [Patreon](https://www.patreon.com/win32).
+If you enjoy using OS Browser and want to support the development, consider contributing to the project!
 
-Thank you to all the contributors for the hard work and dedication for Supermium!
+Thank you to all the contributors for the hard work and dedication for OS Browser!

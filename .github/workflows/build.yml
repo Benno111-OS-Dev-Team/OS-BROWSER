@@ -1,0 +1,180 @@
+name: Build OS Browser
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+    inputs:
+      target_os:
+        description: 'Target OS (win, linux)'
+        required: false
+        default: 'linux'
+        type: choice
+        options:
+          - linux
+          - win
+      target_cpu:
+        description: 'Target CPU architecture'
+        required: false
+        default: 'x64'
+        type: choice
+        options:
+          - x64
+          - x86
+
+env:
+  PRODUCT_NAME: os_browser
+  DEPOT_TOOLS_WIN_TOOLCHAIN: 0
+
+jobs:
+  build-linux:
+    name: Build OS Browser (Linux x64)
+    runs-on: ubuntu-22.04
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.target_os == 'linux' }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            python3 python3-pip \
+            git curl wget \
+            lsb-release \
+            pkg-config \
+            build-essential \
+            libglib2.0-dev \
+            libpango1.0-dev \
+            libatk1.0-dev \
+            libgtk-3-dev \
+            libgdk-pixbuf2.0-dev \
+            libxss-dev \
+            libxtst-dev \
+            libnss3-dev \
+            libcups2-dev \
+            libxrandr-dev \
+            libasound2-dev \
+            libpulse-dev \
+            libspeechd-dev \
+            libdbus-1-dev
+
+      - name: Set up depot_tools
+        run: |
+          git clone --depth=1 https://chromium.googlesource.com/chromium/tools/depot_tools.git /tmp/depot_tools
+          echo "/tmp/depot_tools" >> $GITHUB_PATH
+
+      - name: Install build dependencies via install-build-deps.sh
+        run: |
+          chmod +x build/install-build-deps.sh
+          sudo build/install-build-deps.sh --no-prompt || true
+
+      - name: Configure GN build args (Linux)
+        run: |
+          mkdir -p out/Default
+          cat > out/Default/args.gn << 'GN_EOF'
+          is_debug = false
+          is_official_build = false
+          is_component_build = false
+          symbol_level = 0
+          target_os = "linux"
+          target_cpu = "x64"
+          branding_path_component = "chromium"
+          chrome_pgo_phase = 0
+          enable_nacl = false
+          enable_linux_installer = false
+          GN_EOF
+
+      - name: Generate build files
+        run: |
+          gn gen out/Default
+
+      - name: Compile OS Browser
+        run: |
+          autoninja -C out/Default chrome -j$(nproc)
+
+      - name: Package artifacts
+        run: |
+          mkdir -p artifacts
+          cp -r out/Default/chrome artifacts/
+          cp out/Default/*.so artifacts/ 2>/dev/null || true
+          cp out/Default/icudtl.dat artifacts/ 2>/dev/null || true
+          cp out/Default/resources.pak artifacts/ 2>/dev/null || true
+          cp -r out/Default/locales artifacts/ 2>/dev/null || true
+          tar -czf os-browser-linux-x64.tar.gz -C artifacts .
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: os-browser-linux-x64
+          path: os-browser-linux-x64.tar.gz
+          retention-days: 14
+
+  build-windows:
+    name: Build OS Browser (Windows x64)
+    runs-on: windows-2022
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.target_os == 'win' }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Set up depot_tools
+        shell: powershell
+        run: |
+          git clone --depth=1 https://chromium.googlesource.com/chromium/tools/depot_tools.git C:\depot_tools
+          echo "C:\depot_tools" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Configure GN build args (Windows)
+        shell: cmd
+        run: |
+          mkdir out\Default
+          (
+            echo is_debug = false
+            echo is_official_build = false
+            echo is_component_build = false
+            echo symbol_level = 0
+            echo target_os = "win"
+            echo target_cpu = "${{ inputs.target_cpu || 'x64' }}"
+            echo branding_path_component = "chromium"
+            echo chrome_pgo_phase = 0
+            echo enable_nacl = false
+          ) > out\Default\args.gn
+
+      - name: Generate build files
+        shell: cmd
+        run: gn gen out\Default
+
+      - name: Compile OS Browser
+        shell: cmd
+        run: autoninja -C out\Default chrome
+
+      - name: Package artifacts
+        shell: powershell
+        run: |
+          New-Item -ItemType Directory -Force -Path artifacts
+          Copy-Item out\Default\chrome.exe artifacts\
+          Copy-Item out\Default\*.dll artifacts\ -ErrorAction SilentlyContinue
+          Copy-Item out\Default\icudtl.dat artifacts\ -ErrorAction SilentlyContinue
+          Copy-Item out\Default\resources.pak artifacts\ -ErrorAction SilentlyContinue
+          Copy-Item out\Default\locales artifacts\ -Recurse -ErrorAction SilentlyContinue
+          Compress-Archive -Path artifacts\* -DestinationPath os-browser-windows-x64.zip
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: os-browser-windows-x64
+          path: os-browser-windows-x64.zip
+          retention-days: 14

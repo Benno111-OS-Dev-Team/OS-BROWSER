@@ -26,18 +26,28 @@ on:
           - x86
           - arm64
           - arm
-
-env:
-  PRODUCT_NAME: os_browser
-  DEPOT_TOOLS_WIN_TOOLCHAIN: "0"
-  CHROMIUM_OUT_DIR: out/Default
+      checkout_mode:
+        description: "Use current repo if it is Chromium, otherwise fetch Chromium"
+        required: false
+        default: "auto"
+        type: choice
+        options:
+          - auto
+          - current-repo
+          - fetch-chromium
 
 permissions:
   contents: read
 
 concurrency:
-  group: build-os-browser-${{ github.ref }}-${{ github.event_name }}-${{ inputs.target_os || 'auto' }}-${{ inputs.target_cpu || 'auto' }}
+  group: build-os-browser-${{ github.ref }}-${{ github.event_name }}-${{ inputs.target_os || 'linux' }}-${{ inputs.target_cpu || 'x64' }}
   cancel-in-progress: true
+
+env:
+  PRODUCT_NAME: os_browser
+  DEPOT_TOOLS_WIN_TOOLCHAIN: "0"
+  DEPOT_TOOLS_UPDATE: "1"
+  CHROMIUM_FETCH_DEPTH: "--no-history"
 
 jobs:
   build-linux:
@@ -48,46 +58,37 @@ jobs:
 
     env:
       DEPOT_TOOLS_DIR: /tmp/depot_tools
-      CHROMIUM_OUT_DIR: out/Default
+      WORK_ROOT: ${{ github.workspace }}/chromium-work
+      SRC_DIR: ${{ github.workspace }}/chromium-work/src
+      OUT_DIR: out/Default
 
     steps:
-      - name: Checkout repository
+      - name: Checkout OS Browser repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
+          path: repo
 
-      - name: Verify Chromium source checkout
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          if [ ! -f ".gn" ]; then
-            echo "::error::This workflow must run from the root of a Chromium source checkout or fork."
-            echo "::error::Missing .gn file. If this repo only contains patches or browser branding files, add a gclient sync step first."
-            exit 1
-          fi
-
-          if [ ! -d "build" ]; then
-            echo "::error::Missing Chromium build/ directory."
-            exit 1
-          fi
-
-      - name: Install system dependencies
+      - name: Install Linux host dependencies
         shell: bash
         run: |
           set -euo pipefail
 
           sudo apt-get update
           sudo apt-get install -y \
-            python3 \
-            python3-pip \
             git \
             curl \
             wget \
+            python3 \
+            python3-pip \
             lsb-release \
             pkg-config \
             build-essential \
             ninja-build \
+            xz-utils \
+            unzip \
+            file \
+            rsync \
             libglib2.0-dev \
             libpango1.0-dev \
             libatk1.0-dev \
@@ -112,49 +113,90 @@ jobs:
           git clone --depth=1 https://chromium.googlesource.com/chromium/tools/depot_tools.git "$DEPOT_TOOLS_DIR"
 
           echo "$DEPOT_TOOLS_DIR" >> "$GITHUB_PATH"
-          echo "DEPOT_TOOLS_UPDATE=1" >> "$GITHUB_ENV"
-
-      - name: Bootstrap depot_tools
-        shell: bash
-        run: |
-          set -euo pipefail
 
           export PATH="$DEPOT_TOOLS_DIR:$PATH"
 
-          # This creates the missing python3_bin_reldir.txt and CIPD Python metadata.
           "$DEPOT_TOOLS_DIR/update_depot_tools" || true
 
-          # Force depot_tools wrappers to initialize.
           gclient --version
           gn --version
           autoninja --version
 
-          if [ ! -f "$DEPOT_TOOLS_DIR/python3_bin_reldir.txt" ]; then
-            echo "::error::depot_tools did not bootstrap correctly. Missing python3_bin_reldir.txt."
-            exit 1
-          fi
+          test -f "$DEPOT_TOOLS_DIR/python3_bin_reldir.txt"
 
-      - name: Install Chromium build dependencies
+      - name: Prepare Chromium source
         shell: bash
         run: |
           set -euo pipefail
 
           export PATH="$DEPOT_TOOLS_DIR:$PATH"
 
-          if [ -x "build/install-build-deps.sh" ]; then
-            sudo build/install-build-deps.sh --no-prompt || true
+          MODE="${{ inputs.checkout_mode || 'auto' }}"
+
+          if [[ "$MODE" == "current-repo" ]]; then
+            if [[ ! -f "$GITHUB_WORKSPACE/repo/.gn" ]]; then
+              echo "::error::checkout_mode=current-repo was selected, but the repository is not a Chromium checkout. Missing .gn."
+              exit 1
+            fi
+
+            rm -rf "$WORK_ROOT"
+            mkdir -p "$WORK_ROOT"
+            ln -s "$GITHUB_WORKSPACE/repo" "$SRC_DIR"
+          elif [[ "$MODE" == "fetch-chromium" ]]; then
+            rm -rf "$WORK_ROOT"
+            mkdir -p "$WORK_ROOT"
+            cd "$WORK_ROOT"
+
+            fetch --nohooks --no-history chromium
           else
-            echo "build/install-build-deps.sh not found or not executable; skipping."
+            if [[ -f "$GITHUB_WORKSPACE/repo/.gn" ]]; then
+              rm -rf "$WORK_ROOT"
+              mkdir -p "$WORK_ROOT"
+              ln -s "$GITHUB_WORKSPACE/repo" "$SRC_DIR"
+            else
+              rm -rf "$WORK_ROOT"
+              mkdir -p "$WORK_ROOT"
+              cd "$WORK_ROOT"
+
+              fetch --nohooks --no-history chromium
+            fi
           fi
 
-      - name: Configure GN build args
+          cd "$SRC_DIR"
+
+          if [[ ! -f ".gn" ]]; then
+            echo "::error::Chromium source setup failed. Missing $SRC_DIR/.gn."
+            exit 1
+          fi
+
+          gclient sync --nohooks --with_branch_heads --with_tags
+          gclient runhooks
+
+      - name: Install Chromium Linux build dependencies
         shell: bash
         run: |
           set -euo pipefail
 
-          mkdir -p "$CHROMIUM_OUT_DIR"
+          export PATH="$DEPOT_TOOLS_DIR:$PATH"
 
-          cat > "$CHROMIUM_OUT_DIR/args.gn" <<'GN_EOF'
+          cd "$SRC_DIR"
+
+          if [[ -x build/install-build-deps.sh ]]; then
+            sudo build/install-build-deps.sh --no-prompt || true
+          fi
+
+      - name: Configure GN Linux build
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          export PATH="$DEPOT_TOOLS_DIR:$PATH"
+
+          cd "$SRC_DIR"
+
+          mkdir -p "$OUT_DIR"
+
+          cat > "$OUT_DIR/args.gn" <<'GN_EOF'
           is_debug = false
           is_official_build = false
           is_component_build = false
@@ -174,54 +216,61 @@ jobs:
           use_lld = true
           GN_EOF
 
-          cat "$CHROMIUM_OUT_DIR/args.gn"
+          cat "$OUT_DIR/args.gn"
 
-      - name: Generate build files
+      - name: Generate Linux build files
         shell: bash
         run: |
           set -euo pipefail
 
           export PATH="$DEPOT_TOOLS_DIR:$PATH"
-          gn gen "$CHROMIUM_OUT_DIR"
 
-      - name: Compile OS Browser
+          cd "$SRC_DIR"
+          gn gen "$OUT_DIR"
+
+      - name: Compile Linux browser
         shell: bash
         run: |
           set -euo pipefail
 
           export PATH="$DEPOT_TOOLS_DIR:$PATH"
-          autoninja -C "$CHROMIUM_OUT_DIR" chrome -j"$(nproc)"
 
-      - name: Package Linux artifact
+          cd "$SRC_DIR"
+          autoninja -C "$OUT_DIR" chrome -j"$(nproc)"
+
+      - name: Package Linux browser
         shell: bash
         run: |
           set -euo pipefail
 
-          rm -rf artifacts
-          mkdir -p artifacts
+          cd "$SRC_DIR"
 
-          cp "$CHROMIUM_OUT_DIR/chrome" artifacts/
+          rm -rf "$GITHUB_WORKSPACE/artifacts"
+          mkdir -p "$GITHUB_WORKSPACE/artifacts/os-browser-linux-x64"
 
-          cp "$CHROMIUM_OUT_DIR/chrome_sandbox" artifacts/ 2>/dev/null || true
-          cp "$CHROMIUM_OUT_DIR/icudtl.dat" artifacts/ 2>/dev/null || true
+          cp "$OUT_DIR/chrome" "$GITHUB_WORKSPACE/artifacts/os-browser-linux-x64/"
 
-          cp "$CHROMIUM_OUT_DIR/"*.pak artifacts/ 2>/dev/null || true
-          cp "$CHROMIUM_OUT_DIR/"*.bin artifacts/ 2>/dev/null || true
-          cp "$CHROMIUM_OUT_DIR/"*.so artifacts/ 2>/dev/null || true
+          cp "$OUT_DIR/chrome_sandbox" "$GITHUB_WORKSPACE/artifacts/os-browser-linux-x64/" 2>/dev/null || true
+          cp "$OUT_DIR/icudtl.dat" "$GITHUB_WORKSPACE/artifacts/os-browser-linux-x64/" 2>/dev/null || true
 
-          cp -r "$CHROMIUM_OUT_DIR/locales" artifacts/ 2>/dev/null || true
-          cp -r "$CHROMIUM_OUT_DIR/resources" artifacts/ 2>/dev/null || true
-          cp -r "$CHROMIUM_OUT_DIR/swiftshader" artifacts/ 2>/dev/null || true
+          cp "$OUT_DIR/"*.pak "$GITHUB_WORKSPACE/artifacts/os-browser-linux-x64/" 2>/dev/null || true
+          cp "$OUT_DIR/"*.bin "$GITHUB_WORKSPACE/artifacts/os-browser-linux-x64/" 2>/dev/null || true
+          cp "$OUT_DIR/"*.so "$GITHUB_WORKSPACE/artifacts/os-browser-linux-x64/" 2>/dev/null || true
 
-          cat > artifacts/run-os-browser.sh <<'EOF'
+          cp -r "$OUT_DIR/locales" "$GITHUB_WORKSPACE/artifacts/os-browser-linux-x64/" 2>/dev/null || true
+          cp -r "$OUT_DIR/resources" "$GITHUB_WORKSPACE/artifacts/os-browser-linux-x64/" 2>/dev/null || true
+          cp -r "$OUT_DIR/swiftshader" "$GITHUB_WORKSPACE/artifacts/os-browser-linux-x64/" 2>/dev/null || true
+
+          cat > "$GITHUB_WORKSPACE/artifacts/os-browser-linux-x64/run-os-browser.sh" <<'EOF'
           #!/usr/bin/env bash
           DIR="$(cd "$(dirname "$0")" && pwd)"
           exec "$DIR/chrome" "$@"
           EOF
 
-          chmod +x artifacts/run-os-browser.sh
+          chmod +x "$GITHUB_WORKSPACE/artifacts/os-browser-linux-x64/run-os-browser.sh"
 
-          tar -czf os-browser-linux-x64.tar.gz -C artifacts .
+          cd "$GITHUB_WORKSPACE/artifacts"
+          tar -czf "$GITHUB_WORKSPACE/os-browser-linux-x64.tar.gz" os-browser-linux-x64
 
       - name: Upload Linux artifact
         uses: actions/upload-artifact@v4
@@ -238,25 +287,17 @@ jobs:
 
     env:
       DEPOT_TOOLS_DIR: C:\depot_tools
-      CHROMIUM_OUT_DIR: out\Default
+      WORK_ROOT: C:\chromium-work
+      SRC_DIR: C:\chromium-work\src
+      OUT_DIR: out\Default
       DEPOT_TOOLS_WIN_TOOLCHAIN: "0"
 
     steps:
-      - name: Checkout repository
+      - name: Checkout OS Browser repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
-
-      - name: Verify Chromium source checkout
-        shell: powershell
-        run: |
-          if (!(Test-Path ".gn")) {
-            Write-Error "This workflow must run from the root of a Chromium source checkout or fork. Missing .gn file."
-          }
-
-          if (!(Test-Path "build")) {
-            Write-Error "Missing Chromium build/ directory."
-          }
+          path: repo
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -273,11 +314,7 @@ jobs:
           git clone --depth=1 https://chromium.googlesource.com/chromium/tools/depot_tools.git "${env:DEPOT_TOOLS_DIR}"
 
           "${env:DEPOT_TOOLS_DIR}" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-          "DEPOT_TOOLS_UPDATE=1" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
-      - name: Bootstrap depot_tools
-        shell: powershell
-        run: |
           $env:PATH = "${env:DEPOT_TOOLS_DIR};$env:PATH"
 
           & "${env:DEPOT_TOOLS_DIR}\update_depot_tools.bat"
@@ -287,10 +324,76 @@ jobs:
           autoninja --version
 
           if (!(Test-Path "${env:DEPOT_TOOLS_DIR}\python3_bin_reldir.txt")) {
-            Write-Error "depot_tools did not bootstrap correctly. Missing python3_bin_reldir.txt."
+            Write-Error "depot_tools bootstrap failed. Missing python3_bin_reldir.txt."
           }
 
-      - name: Resolve build CPU
+      - name: Prepare Chromium source
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $env:PATH = "${env:DEPOT_TOOLS_DIR};$env:PATH"
+
+          $mode = "${{ inputs.checkout_mode }}"
+          if ([string]::IsNullOrWhiteSpace($mode)) {
+            $mode = "auto"
+          }
+
+          $repoPath = "${env:GITHUB_WORKSPACE}\repo"
+
+          if ($mode -eq "current-repo") {
+            if (!(Test-Path "$repoPath\.gn")) {
+              Write-Error "checkout_mode=current-repo was selected, but the repository is not a Chromium checkout. Missing .gn."
+            }
+
+            if (Test-Path "${env:WORK_ROOT}") {
+              Remove-Item -Recurse -Force "${env:WORK_ROOT}"
+            }
+
+            New-Item -ItemType Directory -Force -Path "${env:WORK_ROOT}" | Out-Null
+            cmd /c mklink /D "${env:SRC_DIR}" "$repoPath"
+          }
+          elseif ($mode -eq "fetch-chromium") {
+            if (Test-Path "${env:WORK_ROOT}") {
+              Remove-Item -Recurse -Force "${env:WORK_ROOT}"
+            }
+
+            New-Item -ItemType Directory -Force -Path "${env:WORK_ROOT}" | Out-Null
+            Set-Location "${env:WORK_ROOT}"
+
+            fetch --nohooks --no-history chromium
+          }
+          else {
+            if (Test-Path "$repoPath\.gn") {
+              if (Test-Path "${env:WORK_ROOT}") {
+                Remove-Item -Recurse -Force "${env:WORK_ROOT}"
+              }
+
+              New-Item -ItemType Directory -Force -Path "${env:WORK_ROOT}" | Out-Null
+              cmd /c mklink /D "${env:SRC_DIR}" "$repoPath"
+            }
+            else {
+              if (Test-Path "${env:WORK_ROOT}") {
+                Remove-Item -Recurse -Force "${env:WORK_ROOT}"
+              }
+
+              New-Item -ItemType Directory -Force -Path "${env:WORK_ROOT}" | Out-Null
+              Set-Location "${env:WORK_ROOT}"
+
+              fetch --nohooks --no-history chromium
+            }
+          }
+
+          Set-Location "${env:SRC_DIR}"
+
+          if (!(Test-Path ".gn")) {
+            Write-Error "Chromium source setup failed. Missing ${env:SRC_DIR}\.gn."
+          }
+
+          gclient sync --nohooks --with_branch_heads --with_tags
+          gclient runhooks
+
+      - name: Resolve Windows CPU
         id: cpu
         shell: powershell
         run: |
@@ -306,10 +409,16 @@ jobs:
 
           "cpu=$cpu" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 
-      - name: Configure GN build args
+      - name: Configure GN Windows build
         shell: powershell
         run: |
-          New-Item -ItemType Directory -Force -Path "${env:CHROMIUM_OUT_DIR}" | Out-Null
+          $ErrorActionPreference = "Stop"
+
+          $env:PATH = "${env:DEPOT_TOOLS_DIR};$env:PATH"
+
+          Set-Location "${env:SRC_DIR}"
+
+          New-Item -ItemType Directory -Force -Path "${env:OUT_DIR}" | Out-Null
 
           @"
           is_debug = false
@@ -327,38 +436,52 @@ jobs:
           treat_warnings_as_errors = false
 
           use_lld = true
-          "@ | Set-Content -Path "${env:CHROMIUM_OUT_DIR}\args.gn" -Encoding ascii
+          "@ | Set-Content -Path "${env:OUT_DIR}\args.gn" -Encoding ascii
 
-          Get-Content "${env:CHROMIUM_OUT_DIR}\args.gn"
+          Get-Content "${env:OUT_DIR}\args.gn"
 
-      - name: Generate build files
+      - name: Generate Windows build files
         shell: powershell
         run: |
+          $ErrorActionPreference = "Stop"
+
           $env:PATH = "${env:DEPOT_TOOLS_DIR};$env:PATH"
-          gn gen "${env:CHROMIUM_OUT_DIR}"
 
-      - name: Compile OS Browser
+          Set-Location "${env:SRC_DIR}"
+          gn gen "${env:OUT_DIR}"
+
+      - name: Compile Windows browser
         shell: powershell
         run: |
+          $ErrorActionPreference = "Stop"
+
           $env:PATH = "${env:DEPOT_TOOLS_DIR};$env:PATH"
-          autoninja -C "${env:CHROMIUM_OUT_DIR}" chrome
 
-      - name: Package Windows artifact
+          Set-Location "${env:SRC_DIR}"
+          autoninja -C "${env:OUT_DIR}" chrome
+
+      - name: Package Windows browser
         shell: powershell
         run: |
-          Remove-Item -Recurse -Force artifacts -ErrorAction SilentlyContinue
-          New-Item -ItemType Directory -Force -Path artifacts | Out-Null
+          $ErrorActionPreference = "Stop"
 
-          Copy-Item "${env:CHROMIUM_OUT_DIR}\chrome.exe" artifacts\
-          Copy-Item "${env:CHROMIUM_OUT_DIR}\*.dll" artifacts\ -ErrorAction SilentlyContinue
-          Copy-Item "${env:CHROMIUM_OUT_DIR}\*.pak" artifacts\ -ErrorAction SilentlyContinue
-          Copy-Item "${env:CHROMIUM_OUT_DIR}\*.bin" artifacts\ -ErrorAction SilentlyContinue
-          Copy-Item "${env:CHROMIUM_OUT_DIR}\icudtl.dat" artifacts\ -ErrorAction SilentlyContinue
-          Copy-Item "${env:CHROMIUM_OUT_DIR}\locales" artifacts\ -Recurse -ErrorAction SilentlyContinue
-          Copy-Item "${env:CHROMIUM_OUT_DIR}\resources" artifacts\ -Recurse -ErrorAction SilentlyContinue
-          Copy-Item "${env:CHROMIUM_OUT_DIR}\swiftshader" artifacts\ -Recurse -ErrorAction SilentlyContinue
+          Set-Location "${env:SRC_DIR}"
 
-          Compress-Archive -Path artifacts\* -DestinationPath "os-browser-windows-${{ steps.cpu.outputs.cpu }}.zip" -Force
+          $artifactDir = "${env:GITHUB_WORKSPACE}\artifacts\os-browser-windows-${{ steps.cpu.outputs.cpu }}"
+
+          Remove-Item -Recurse -Force "${env:GITHUB_WORKSPACE}\artifacts" -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force -Path "$artifactDir" | Out-Null
+
+          Copy-Item "${env:OUT_DIR}\chrome.exe" "$artifactDir\"
+          Copy-Item "${env:OUT_DIR}\*.dll" "$artifactDir\" -ErrorAction SilentlyContinue
+          Copy-Item "${env:OUT_DIR}\*.pak" "$artifactDir\" -ErrorAction SilentlyContinue
+          Copy-Item "${env:OUT_DIR}\*.bin" "$artifactDir\" -ErrorAction SilentlyContinue
+          Copy-Item "${env:OUT_DIR}\icudtl.dat" "$artifactDir\" -ErrorAction SilentlyContinue
+          Copy-Item "${env:OUT_DIR}\locales" "$artifactDir\" -Recurse -ErrorAction SilentlyContinue
+          Copy-Item "${env:OUT_DIR}\resources" "$artifactDir\" -Recurse -ErrorAction SilentlyContinue
+          Copy-Item "${env:OUT_DIR}\swiftshader" "$artifactDir\" -Recurse -ErrorAction SilentlyContinue
+
+          Compress-Archive -Path "$artifactDir\*" -DestinationPath "${env:GITHUB_WORKSPACE}\os-browser-windows-${{ steps.cpu.outputs.cpu }}.zip" -Force
 
       - name: Upload Windows artifact
         uses: actions/upload-artifact@v4
@@ -375,105 +498,50 @@ jobs:
 
     env:
       DEPOT_TOOLS_DIR: /tmp/depot_tools
+      WORK_ROOT: ${{ github.workspace }}/chromium-work
+      SRC_DIR: ${{ github.workspace }}/chromium-work/src
+      OUT_DIR: out/Android
       ANDROID_SDK_ROOT: /opt/android-sdk
       ANDROID_HOME: /opt/android-sdk
-      NDK_VERSION: "27.2.12479018"
-      BUILD_TOOLS_VERSION: "34.0.0"
-      ANDROID_API_LEVEL: "33"
-      CHROMIUM_OUT_DIR: out/Android
 
     steps:
-      - name: Checkout repository
+      - name: Checkout OS Browser repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
+          path: repo
 
-      - name: Verify Chromium source checkout
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          if [ ! -f ".gn" ]; then
-            echo "::error::This workflow must run from the root of a Chromium source checkout or fork."
-            echo "::error::Missing .gn file."
-            exit 1
-          fi
-
-          if [ ! -d "build" ]; then
-            echo "::error::Missing Chromium build/ directory."
-            exit 1
-          fi
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Set up Java 17
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: "17"
-
-      - name: Install system dependencies
+      - name: Install Android host dependencies
         shell: bash
         run: |
           set -euo pipefail
 
           sudo apt-get update
           sudo apt-get install -y \
-            python3 \
-            python3-pip \
             git \
             curl \
             wget \
-            unzip \
+            python3 \
+            python3-pip \
             lsb-release \
             pkg-config \
             build-essential \
             ninja-build \
+            xz-utils \
+            unzip \
+            file \
+            rsync \
+            openjdk-17-jdk \
             libncurses5 \
             lib32z1 \
             lib32stdc++6 \
-            libc6-i386 \
-            openjdk-17-jdk
+            libc6-i386
 
-      - name: Install Android SDK command-line tools
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          sudo mkdir -p "$ANDROID_SDK_ROOT/cmdline-tools"
-          wget -q https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip -O /tmp/cmdline-tools.zip
-          sudo unzip -q /tmp/cmdline-tools.zip -d "$ANDROID_SDK_ROOT/cmdline-tools"
-
-          if [ -d "$ANDROID_SDK_ROOT/cmdline-tools/latest" ]; then
-            sudo rm -rf "$ANDROID_SDK_ROOT/cmdline-tools/latest"
-          fi
-
-          sudo mv "$ANDROID_SDK_ROOT/cmdline-tools/cmdline-tools" "$ANDROID_SDK_ROOT/cmdline-tools/latest"
-          sudo chown -R "$USER:$USER" "$ANDROID_SDK_ROOT"
-
-          echo "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
-          echo "$ANDROID_SDK_ROOT/platform-tools" >> "$GITHUB_PATH"
-          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT" >> "$GITHUB_ENV"
-          echo "ANDROID_HOME=$ANDROID_SDK_ROOT" >> "$GITHUB_ENV"
-
-      - name: Accept Android SDK licenses and install NDK
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          yes | sdkmanager --licenses
-
-          sdkmanager \
-            "platforms;android-${ANDROID_API_LEVEL}" \
-            "build-tools;${BUILD_TOOLS_VERSION}" \
-            "platform-tools" \
-            "ndk;${NDK_VERSION}"
-
-          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
-          echo "ANDROID_NDK_ROOT=$ANDROID_SDK_ROOT/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
 
       - name: Set up depot_tools
         shell: bash
@@ -484,12 +552,6 @@ jobs:
           git clone --depth=1 https://chromium.googlesource.com/chromium/tools/depot_tools.git "$DEPOT_TOOLS_DIR"
 
           echo "$DEPOT_TOOLS_DIR" >> "$GITHUB_PATH"
-          echo "DEPOT_TOOLS_UPDATE=1" >> "$GITHUB_ENV"
-
-      - name: Bootstrap depot_tools
-        shell: bash
-        run: |
-          set -euo pipefail
 
           export PATH="$DEPOT_TOOLS_DIR:$PATH"
 
@@ -499,10 +561,84 @@ jobs:
           gn --version
           autoninja --version
 
-          if [ ! -f "$DEPOT_TOOLS_DIR/python3_bin_reldir.txt" ]; then
-            echo "::error::depot_tools did not bootstrap correctly. Missing python3_bin_reldir.txt."
+          test -f "$DEPOT_TOOLS_DIR/python3_bin_reldir.txt"
+
+      - name: Prepare Chromium Android source
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          export PATH="$DEPOT_TOOLS_DIR:$PATH"
+
+          MODE="${{ inputs.checkout_mode || 'auto' }}"
+
+          if [[ "$MODE" == "current-repo" ]]; then
+            if [[ ! -f "$GITHUB_WORKSPACE/repo/.gn" ]]; then
+              echo "::error::checkout_mode=current-repo was selected, but the repository is not a Chromium checkout. Missing .gn."
+              exit 1
+            fi
+
+            rm -rf "$WORK_ROOT"
+            mkdir -p "$WORK_ROOT"
+            ln -s "$GITHUB_WORKSPACE/repo" "$SRC_DIR"
+
+            cd "$WORK_ROOT"
+            if [[ -f ".gclient" ]]; then
+              python3 - <<'PY'
+          from pathlib import Path
+          p = Path(".gclient")
+          s = p.read_text()
+          if "target_os" not in s:
+              s += "\ntarget_os = ['android']\n"
+          elif "android" not in s:
+              s += "\ntarget_os = ['android']\n"
+          p.write_text(s)
+          PY
+            fi
+          elif [[ "$MODE" == "fetch-chromium" ]]; then
+            rm -rf "$WORK_ROOT"
+            mkdir -p "$WORK_ROOT"
+            cd "$WORK_ROOT"
+
+            fetch --nohooks --no-history android
+          else
+            if [[ -f "$GITHUB_WORKSPACE/repo/.gn" ]]; then
+              rm -rf "$WORK_ROOT"
+              mkdir -p "$WORK_ROOT"
+              ln -s "$GITHUB_WORKSPACE/repo" "$SRC_DIR"
+
+              cd "$WORK_ROOT"
+              cat > .gclient <<'EOF'
+          solutions = [
+            {
+              "name": "src",
+              "url": "https://chromium.googlesource.com/chromium/src.git",
+              "deps_file": "DEPS",
+              "managed": False,
+              "custom_deps": {},
+              "custom_vars": {},
+            },
+          ]
+          target_os = ["android"]
+          EOF
+            else
+              rm -rf "$WORK_ROOT"
+              mkdir -p "$WORK_ROOT"
+              cd "$WORK_ROOT"
+
+              fetch --nohooks --no-history android
+            fi
+          fi
+
+          cd "$SRC_DIR"
+
+          if [[ ! -f ".gn" ]]; then
+            echo "::error::Chromium Android source setup failed. Missing $SRC_DIR/.gn."
             exit 1
           fi
+
+          gclient sync --nohooks --with_branch_heads --with_tags
+          gclient runhooks
 
       - name: Install Chromium Android build dependencies
         shell: bash
@@ -511,11 +647,13 @@ jobs:
 
           export PATH="$DEPOT_TOOLS_DIR:$PATH"
 
-          if [ -x "build/install-build-deps.sh" ]; then
+          cd "$SRC_DIR"
+
+          if [[ -x build/install-build-deps.sh ]]; then
             sudo build/install-build-deps.sh --no-prompt --android || true
           fi
 
-          if [ -x "build/install-build-deps-android.sh" ]; then
+          if [[ -x build/install-build-deps-android.sh ]]; then
             sudo build/install-build-deps-android.sh || true
           fi
 
@@ -527,7 +665,7 @@ jobs:
 
           CPU="${{ inputs.target_cpu }}"
 
-          if [ -z "$CPU" ]; then
+          if [[ -z "$CPU" ]]; then
             CPU="arm64"
           fi
 
@@ -552,14 +690,18 @@ jobs:
 
           echo "cpu=$GN_CPU" >> "$GITHUB_OUTPUT"
 
-      - name: Configure GN build args
+      - name: Configure GN Android build
         shell: bash
         run: |
           set -euo pipefail
 
-          mkdir -p "$CHROMIUM_OUT_DIR"
+          export PATH="$DEPOT_TOOLS_DIR:$PATH"
 
-          cat > "$CHROMIUM_OUT_DIR/args.gn" <<GN_EOF
+          cd "$SRC_DIR"
+
+          mkdir -p "$OUT_DIR"
+
+          cat > "$OUT_DIR/args.gn" <<GN_EOF
           is_debug = false
           is_official_build = false
           is_component_build = false
@@ -574,48 +716,49 @@ jobs:
           enable_nacl = false
           treat_warnings_as_errors = false
 
-          android_sdk_version = "${ANDROID_API_LEVEL}"
-          android_sdk_root = "${ANDROID_SDK_ROOT}"
-          android_ndk_root = "${ANDROID_NDK_HOME}"
-
           use_lld = true
           GN_EOF
 
-          cat "$CHROMIUM_OUT_DIR/args.gn"
+          cat "$OUT_DIR/args.gn"
 
-      - name: Generate build files
+      - name: Generate Android build files
         shell: bash
         run: |
           set -euo pipefail
 
           export PATH="$DEPOT_TOOLS_DIR:$PATH"
-          gn gen "$CHROMIUM_OUT_DIR"
 
-      - name: Compile OS Browser APK
+          cd "$SRC_DIR"
+          gn gen "$OUT_DIR"
+
+      - name: Compile Android APK
         shell: bash
         run: |
           set -euo pipefail
 
           export PATH="$DEPOT_TOOLS_DIR:$PATH"
-          autoninja -C "$CHROMIUM_OUT_DIR" chrome_public_apk -j"$(nproc)"
 
-      - name: Locate and rename APK
+          cd "$SRC_DIR"
+          autoninja -C "$OUT_DIR" chrome_public_apk -j"$(nproc)"
+
+      - name: Package Android APK
         shell: bash
         run: |
           set -euo pipefail
 
-          APK="$(find "$CHROMIUM_OUT_DIR" -type f \( -name "ChromePublic.apk" -o -name "chrome_public.apk" -o -name "*.apk" \) | head -n 1)"
+          cd "$SRC_DIR"
 
-          if [ -z "$APK" ]; then
+          APK="$(find "$OUT_DIR" -type f \( -name "ChromePublic.apk" -o -name "chrome_public.apk" -o -name "*.apk" \) | head -n 1)"
+
+          if [[ -z "$APK" ]]; then
             echo "::error::No APK was produced."
-            find "$CHROMIUM_OUT_DIR" -maxdepth 4 -type f | sort | tail -200
+            find "$OUT_DIR" -maxdepth 5 -type f | sort | tail -200
             exit 1
           fi
 
-          echo "Found APK: $APK"
-          cp "$APK" "os-browser-android-${{ steps.cpu.outputs.cpu }}.apk"
+          cp "$APK" "$GITHUB_WORKSPACE/os-browser-android-${{ steps.cpu.outputs.cpu }}.apk"
 
-      - name: Upload Android APK artifact
+      - name: Upload Android artifact
         uses: actions/upload-artifact@v4
         with:
           name: os-browser-android-${{ steps.cpu.outputs.cpu }}

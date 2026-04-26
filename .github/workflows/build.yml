@@ -28,6 +28,9 @@ env:
   PRODUCT_NAME: os_browser
   DEPOT_TOOLS_WIN_TOOLCHAIN: 0
 
+permissions:
+  contents: read
+
 jobs:
   build-linux:
     name: Build OS Browser (Linux x64)

@@ -8,21 +8,24 @@ on:
   workflow_dispatch:
     inputs:
       target_os:
-        description: 'Target OS (win, linux)'
+        description: 'Target OS (win, linux, android)'
         required: false
         default: 'linux'
         type: choice
         options:
           - linux
           - win
+          - android
       target_cpu:
-        description: 'Target CPU architecture'
+        description: 'Target CPU architecture (x64/x86 for desktop; arm64/arm for Android)'
         required: false
         default: 'x64'
         type: choice
         options:
           - x64
           - x86
+          - arm64
+          - arm
 
 env:
   PRODUCT_NAME: os_browser
@@ -180,4 +183,125 @@ jobs:
         with:
           name: os-browser-windows-x64
           path: os-browser-windows-x64.zip
+          retention-days: 14
+
+  build-android:
+    name: Build OS Browser (Android)
+    runs-on: ubuntu-22.04
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.target_os == 'android' }}
+
+    env:
+      ANDROID_SDK_ROOT: /opt/android-sdk
+      NDK_VERSION: "27.2.12479018"
+      BUILD_TOOLS_VERSION: "34.0.0"
+      ANDROID_API_LEVEL: "33"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            python3 python3-pip \
+            git curl wget unzip \
+            lsb-release \
+            pkg-config \
+            build-essential \
+            libncurses5 \
+            lib32z1 lib32stdc++6 \
+            libc6-i386 \
+            openjdk-17-jdk
+
+      - name: Install Android SDK command-line tools
+        run: |
+          sudo mkdir -p $ANDROID_SDK_ROOT/cmdline-tools
+          wget -q https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip -O /tmp/cmdline-tools.zip
+          sudo unzip -q /tmp/cmdline-tools.zip -d $ANDROID_SDK_ROOT/cmdline-tools
+          sudo mv $ANDROID_SDK_ROOT/cmdline-tools/cmdline-tools $ANDROID_SDK_ROOT/cmdline-tools/latest
+          echo "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin" >> $GITHUB_PATH
+          echo "$ANDROID_SDK_ROOT/platform-tools" >> $GITHUB_PATH
+          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT" >> $GITHUB_ENV
+          echo "ANDROID_HOME=$ANDROID_SDK_ROOT" >> $GITHUB_ENV
+
+      - name: Accept Android SDK licenses and install NDK
+        run: |
+          yes | sdkmanager --licenses
+          sdkmanager \
+            "platforms;android-${ANDROID_API_LEVEL}" \
+            "build-tools;${BUILD_TOOLS_VERSION}" \
+            "platform-tools" \
+            "ndk;${NDK_VERSION}"
+          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/${NDK_VERSION}" >> $GITHUB_ENV
+
+      - name: Set up depot_tools
+        run: |
+          git clone --depth=1 https://chromium.googlesource.com/chromium/tools/depot_tools.git /tmp/depot_tools
+          echo "/tmp/depot_tools" >> $GITHUB_PATH
+
+      - name: Install Linux build dependencies
+        run: |
+          chmod +x build/install-build-deps.sh
+          sudo build/install-build-deps.sh --no-prompt --android || true
+          chmod +x build/install-build-deps-android.sh 2>/dev/null && \
+            sudo build/install-build-deps-android.sh || true
+
+      - name: Configure GN build args (Android)
+        run: |
+          mkdir -p out/Android
+          CPU="${{ inputs.target_cpu }}"
+          # Default to arm64 when cpu is a desktop value
+          if [[ "$CPU" == "x64" || "$CPU" == "x86" ]]; then CPU="arm64"; fi
+          cat > out/Android/args.gn << GN_EOF
+          is_debug = false
+          is_official_build = false
+          is_component_build = false
+          symbol_level = 0
+          target_os = "android"
+          target_cpu = "$CPU"
+          branding_path_component = "chromium"
+          chrome_pgo_phase = 0
+          enable_nacl = false
+          android_sdk_version = "${ANDROID_API_LEVEL}"
+          android_ndk_root = "${ANDROID_NDK_HOME}"
+          GN_EOF
+
+      - name: Generate build files
+        run: |
+          gn gen out/Android
+
+      - name: Compile OS Browser APK
+        run: |
+          autoninja -C out/Android chrome_public_apk -j$(nproc)
+
+      - name: Locate and rename APK
+        run: |
+          APK=$(find out/Android -name "ChromePublic.apk" -o -name "chrome_public.apk" 2>/dev/null | head -1)
+          if [ -z "$APK" ]; then
+            APK=$(find out/Android/apks -name "*.apk" 2>/dev/null | head -1)
+          fi
+          echo "Found APK: $APK"
+          CPU="${{ inputs.target_cpu }}"
+          if [[ "$CPU" == "x64" || "$CPU" == "x86" ]]; then CPU="arm64"; fi
+          cp "$APK" "os-browser-android-${CPU}.apk"
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: os-browser-android-${{ inputs.target_cpu == 'arm' && 'arm' || 'arm64' }}
+          path: os-browser-android-*.apk
           retention-days: 14

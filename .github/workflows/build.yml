@@ -46,6 +46,10 @@ jobs:
     timeout-minutes: 360
     if: ${{ github.event_name != 'workflow_dispatch' || inputs.target_os == 'linux' }}
 
+    env:
+      DEPOT_TOOLS_DIR: /tmp/depot_tools
+      CHROMIUM_OUT_DIR: out/Default
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -59,7 +63,7 @@ jobs:
 
           if [ ! -f ".gn" ]; then
             echo "::error::This workflow must run from the root of a Chromium source checkout or fork."
-            echo "::error::Missing .gn file. If this repo only contains patches or browser branding files, add a step that fetches Chromium first."
+            echo "::error::Missing .gn file. If this repo only contains patches or browser branding files, add a gclient sync step first."
             exit 1
           fi
 
@@ -104,13 +108,38 @@ jobs:
         run: |
           set -euo pipefail
 
-          git clone --depth=1 https://chromium.googlesource.com/chromium/tools/depot_tools.git /tmp/depot_tools
-          echo "/tmp/depot_tools" >> "$GITHUB_PATH"
+          rm -rf "$DEPOT_TOOLS_DIR"
+          git clone --depth=1 https://chromium.googlesource.com/chromium/tools/depot_tools.git "$DEPOT_TOOLS_DIR"
+
+          echo "$DEPOT_TOOLS_DIR" >> "$GITHUB_PATH"
+          echo "DEPOT_TOOLS_UPDATE=1" >> "$GITHUB_ENV"
+
+      - name: Bootstrap depot_tools
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          export PATH="$DEPOT_TOOLS_DIR:$PATH"
+
+          # This creates the missing python3_bin_reldir.txt and CIPD Python metadata.
+          "$DEPOT_TOOLS_DIR/update_depot_tools" || true
+
+          # Force depot_tools wrappers to initialize.
+          gclient --version
+          gn --version
+          autoninja --version
+
+          if [ ! -f "$DEPOT_TOOLS_DIR/python3_bin_reldir.txt" ]; then
+            echo "::error::depot_tools did not bootstrap correctly. Missing python3_bin_reldir.txt."
+            exit 1
+          fi
 
       - name: Install Chromium build dependencies
         shell: bash
         run: |
           set -euo pipefail
+
+          export PATH="$DEPOT_TOOLS_DIR:$PATH"
 
           if [ -x "build/install-build-deps.sh" ]; then
             sudo build/install-build-deps.sh --no-prompt || true
@@ -151,12 +180,16 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
+          export PATH="$DEPOT_TOOLS_DIR:$PATH"
           gn gen "$CHROMIUM_OUT_DIR"
 
       - name: Compile OS Browser
         shell: bash
         run: |
           set -euo pipefail
+
+          export PATH="$DEPOT_TOOLS_DIR:$PATH"
           autoninja -C "$CHROMIUM_OUT_DIR" chrome -j"$(nproc)"
 
       - name: Package Linux artifact
@@ -185,6 +218,7 @@ jobs:
           DIR="$(cd "$(dirname "$0")" && pwd)"
           exec "$DIR/chrome" "$@"
           EOF
+
           chmod +x artifacts/run-os-browser.sh
 
           tar -czf os-browser-linux-x64.tar.gz -C artifacts .
@@ -203,7 +237,9 @@ jobs:
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.target_os == 'win' }}
 
     env:
-      CHROMIUM_OUT_DIR: out/Default
+      DEPOT_TOOLS_DIR: C:\depot_tools
+      CHROMIUM_OUT_DIR: out\Default
+      DEPOT_TOOLS_WIN_TOOLCHAIN: "0"
 
     steps:
       - name: Checkout repository
@@ -230,14 +266,36 @@ jobs:
       - name: Set up depot_tools
         shell: powershell
         run: |
-          git clone --depth=1 https://chromium.googlesource.com/chromium/tools/depot_tools.git C:\depot_tools
-          "C:\depot_tools" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          if (Test-Path "${env:DEPOT_TOOLS_DIR}") {
+            Remove-Item -Recurse -Force "${env:DEPOT_TOOLS_DIR}"
+          }
+
+          git clone --depth=1 https://chromium.googlesource.com/chromium/tools/depot_tools.git "${env:DEPOT_TOOLS_DIR}"
+
+          "${env:DEPOT_TOOLS_DIR}" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          "DEPOT_TOOLS_UPDATE=1" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Bootstrap depot_tools
+        shell: powershell
+        run: |
+          $env:PATH = "${env:DEPOT_TOOLS_DIR};$env:PATH"
+
+          & "${env:DEPOT_TOOLS_DIR}\update_depot_tools.bat"
+
+          gclient --version
+          gn --version
+          autoninja --version
+
+          if (!(Test-Path "${env:DEPOT_TOOLS_DIR}\python3_bin_reldir.txt")) {
+            Write-Error "depot_tools did not bootstrap correctly. Missing python3_bin_reldir.txt."
+          }
 
       - name: Resolve build CPU
         id: cpu
         shell: powershell
         run: |
           $cpu = "${{ inputs.target_cpu }}"
+
           if ([string]::IsNullOrWhiteSpace($cpu)) {
             $cpu = "x64"
           }
@@ -274,12 +332,16 @@ jobs:
           Get-Content "${env:CHROMIUM_OUT_DIR}\args.gn"
 
       - name: Generate build files
-        shell: cmd
-        run: gn gen %CHROMIUM_OUT_DIR%
+        shell: powershell
+        run: |
+          $env:PATH = "${env:DEPOT_TOOLS_DIR};$env:PATH"
+          gn gen "${env:CHROMIUM_OUT_DIR}"
 
       - name: Compile OS Browser
-        shell: cmd
-        run: autoninja -C %CHROMIUM_OUT_DIR% chrome
+        shell: powershell
+        run: |
+          $env:PATH = "${env:DEPOT_TOOLS_DIR};$env:PATH"
+          autoninja -C "${env:CHROMIUM_OUT_DIR}" chrome
 
       - name: Package Windows artifact
         shell: powershell
@@ -312,6 +374,7 @@ jobs:
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.target_os == 'android' }}
 
     env:
+      DEPOT_TOOLS_DIR: /tmp/depot_tools
       ANDROID_SDK_ROOT: /opt/android-sdk
       ANDROID_HOME: /opt/android-sdk
       NDK_VERSION: "27.2.12479018"
@@ -417,13 +480,36 @@ jobs:
         run: |
           set -euo pipefail
 
-          git clone --depth=1 https://chromium.googlesource.com/chromium/tools/depot_tools.git /tmp/depot_tools
-          echo "/tmp/depot_tools" >> "$GITHUB_PATH"
+          rm -rf "$DEPOT_TOOLS_DIR"
+          git clone --depth=1 https://chromium.googlesource.com/chromium/tools/depot_tools.git "$DEPOT_TOOLS_DIR"
+
+          echo "$DEPOT_TOOLS_DIR" >> "$GITHUB_PATH"
+          echo "DEPOT_TOOLS_UPDATE=1" >> "$GITHUB_ENV"
+
+      - name: Bootstrap depot_tools
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          export PATH="$DEPOT_TOOLS_DIR:$PATH"
+
+          "$DEPOT_TOOLS_DIR/update_depot_tools" || true
+
+          gclient --version
+          gn --version
+          autoninja --version
+
+          if [ ! -f "$DEPOT_TOOLS_DIR/python3_bin_reldir.txt" ]; then
+            echo "::error::depot_tools did not bootstrap correctly. Missing python3_bin_reldir.txt."
+            exit 1
+          fi
 
       - name: Install Chromium Android build dependencies
         shell: bash
         run: |
           set -euo pipefail
+
+          export PATH="$DEPOT_TOOLS_DIR:$PATH"
 
           if [ -x "build/install-build-deps.sh" ]; then
             sudo build/install-build-deps.sh --no-prompt --android || true
@@ -501,12 +587,16 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
+          export PATH="$DEPOT_TOOLS_DIR:$PATH"
           gn gen "$CHROMIUM_OUT_DIR"
 
       - name: Compile OS Browser APK
         shell: bash
         run: |
           set -euo pipefail
+
+          export PATH="$DEPOT_TOOLS_DIR:$PATH"
           autoninja -C "$CHROMIUM_OUT_DIR" chrome_public_apk -j"$(nproc)"
 
       - name: Locate and rename APK

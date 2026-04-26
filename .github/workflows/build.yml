@@ -127,7 +127,6 @@ jobs:
   build-windows:
     name: Build OS Browser (Windows x64)
     runs-on: windows-2022
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.target_os == 'win' }}
 
     steps:
       - name: Checkout repository
@@ -194,7 +193,6 @@ jobs:
   build-android:
     name: Build OS Browser (Android)
     runs-on: ubuntu-22.04
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.target_os == 'android' }}
 
     env:
       ANDROID_SDK_ROOT: /opt/android-sdk

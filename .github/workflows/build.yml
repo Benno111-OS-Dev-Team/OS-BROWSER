@@ -74,11 +74,14 @@ jobs:
         run: |
           git clone --depth=1 https://chromium.googlesource.com/chromium/tools/depot_tools.git /tmp/depot_tools
           echo "/tmp/depot_tools" >> $GITHUB_PATH
+          /tmp/depot_tools/update_depot_tools
+          /tmp/depot_tools/ensure_bootstrap
+          python3 /tmp/depot_tools/gclient.py --version
 
       - name: Install build dependencies via install-build-deps.sh
         run: |
           chmod +x build/install-build-deps.sh
-          sudo build/install-build-deps.sh --no-prompt || true
+          sudo build/install-build-deps.sh --no-prompt
 
       - name: Configure GN build args (Linux)
         run: |
@@ -124,7 +127,6 @@ jobs:
   build-windows:
     name: Build OS Browser (Windows x64)
     runs-on: windows-2022
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.target_os == 'win' }}
 
     steps:
       - name: Checkout repository
@@ -142,6 +144,9 @@ jobs:
         run: |
           git clone --depth=1 https://chromium.googlesource.com/chromium/tools/depot_tools.git C:\depot_tools
           echo "C:\depot_tools" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          & C:\depot_tools\update_depot_tools.bat
+          & C:\depot_tools\ensure_bootstrap.bat
+          & C:\depot_tools\gclient.bat --version
 
       - name: Configure GN build args (Windows)
         shell: cmd
@@ -188,7 +193,6 @@ jobs:
   build-android:
     name: Build OS Browser (Android)
     runs-on: ubuntu-22.04
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.target_os == 'android' }}
 
     env:
       ANDROID_SDK_ROOT: /opt/android-sdk
@@ -252,13 +256,18 @@ jobs:
         run: |
           git clone --depth=1 https://chromium.googlesource.com/chromium/tools/depot_tools.git /tmp/depot_tools
           echo "/tmp/depot_tools" >> $GITHUB_PATH
+          /tmp/depot_tools/update_depot_tools
+          /tmp/depot_tools/ensure_bootstrap
+          python3 /tmp/depot_tools/gclient.py --version
 
       - name: Install Linux build dependencies
         run: |
           chmod +x build/install-build-deps.sh
-          sudo build/install-build-deps.sh --no-prompt --android || true
-          chmod +x build/install-build-deps-android.sh 2>/dev/null && \
-            sudo build/install-build-deps-android.sh || true
+          sudo build/install-build-deps.sh --no-prompt --android
+          if [ -f build/install-build-deps-android.sh ]; then
+            chmod +x build/install-build-deps-android.sh
+            sudo build/install-build-deps-android.sh
+          fi
 
       - name: Configure GN build args (Android)
         run: |

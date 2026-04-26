@@ -10,6 +10,7 @@ by a given fuzzer.
 
 import argparse
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -79,8 +80,32 @@ def check_call(args, *, cwd=None, shell=False):
   subprocess.check_call(args, cwd=cwd, shell=shell)
 
 
+def ensure_depot_tools_bootstrapped():
+  """Ensures depot_tools is available before gclient/GN/Ninja steps."""
+  depot_tools_dir = os.path.join(chromium_src_dir, 'third_party', 'depot_tools')
+  if os.path.isdir(depot_tools_dir):
+    os.environ['PATH'] = depot_tools_dir + os.pathsep + os.environ.get(
+        'PATH', '')
+
+  gclient = shutil.which('gclient')
+  if not gclient:
+    raise RuntimeError(
+        'depot_tools is required but gclient was not found on PATH. '
+        'Install depot_tools and add it to PATH before running this script.')
+
+  step('Bootstrapping depot_tools')
+  check_call([gclient, '--version'])
+
+  for tool in ('gn', 'autoninja'):
+    if not shutil.which(tool):
+      raise RuntimeError(
+          f'{tool} was not found on PATH after depot_tools bootstrap. '
+          'Ensure depot_tools is installed correctly.')
+
+
 def Main():
   args = _ParseCommandArguments()
+  ensure_depot_tools_bootstrapped()
 
   os.makedirs(args.build_dir, exist_ok=True)
   os.makedirs(args.html_dir, exist_ok=True)
